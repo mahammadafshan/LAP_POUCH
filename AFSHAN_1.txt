@@ -1,0 +1,170 @@
+
+from google.adk.agents import Agent
+from google.adk.tools import ToolContext
+from datetime import date, timedelta
+
+# Illustrative factors: kg CO2e per passenger-km,
+# kWh, or meal. Replace with sourced regional factors.
+TRAVEL = {
+    "bus": 0.10,
+    "car": 0.20,
+    "bike": 0.10,
+    "train": 0.04,
+    "walking": 0.0,
+    "cycling": 0.0
+}
+ELECTRICITY = 0.70
+FOOD = {
+    "vegetarian": 1.0,
+    "chicken": 2.0,
+    "beef": 5.0
+}
+
+def calculate_travel_emissions(
+    mode: str, km: float
+) -> dict:
+    """Calculate travel emissions for one journey."""
+    mode = mode.lower().strip()
+    if mode not in TRAVEL or km < 0:
+        return {"error": "Invalid mode or distance"}
+    return {
+        "kg_co2e": round(TRAVEL[mode] * km, 3),
+        "factor": TRAVEL[mode],
+        "unit": "kg CO2e per passenger-km",
+        "basis": "illustrative assumption"
+    }
+
+def calculate_electricity_emissions(
+    kwh: float
+) -> dict:
+    """Calculate emissions from electricity usage in kWh."""
+    if kwh < 0:
+        return {"error": "kWh cannot be negative"}
+    return {
+        "kg_co2e": round(kwh * ELECTRICITY, 3),
+        "factor": ELECTRICITY,
+        "basis": "illustrative assumption"
+    }
+
+def calculate_food_emissions(
+    meal_type: str
+) -> dict:
+    """Estimate emissions for a supported meal category."""
+    meal_type = meal_type.lower().strip()
+    if meal_type not in FOOD:
+        return {"error": "Unknown meal category"}
+    return {
+        "kg_co2e": FOOD[meal_type],
+        "basis": "illustrative assumption per meal"
+    }
+
+def log_activity(
+    category: str,
+    details: str,
+    kg_co2e: float,
+    tool_context: ToolContext
+) -> dict:
+    """Save a calculated activity in session memory."""
+    if kg_co2e < 0:
+        return {"error": "Invalid emission value"}
+    records = list(
+        tool_context.state.get("activities", [])
+    )
+    record = {
+        "date": date.today().isoformat(),
+        "category": category,
+        "details": details,
+        "kg_co2e": kg_co2e
+    }
+    records.append(record)
+    tool_context.state["activities"] = records
+    return {"saved": True, "record": record}
+
+def get_summary(
+    period: str,
+    tool_context: ToolContext
+) -> dict:
+    """Summarize logged emissions for today or last 7 days."""
+    today = date.today()
+    if period.lower() not in ["today", "week", "all"]:
+        return {"error": "Use today, week, or all"}
+
+    records = tool_context.state.get("activities", [])
+    selected = []
+    for item in records:
+        day = date.fromisoformat(item["date"])
+        if period == "all":
+            selected.append(item)
+        elif period == "today" and day == today:
+            selected.append(item)
+        elif period == "week" and day >= today - timedelta(days=6):
+            selected.append(item)
+
+    total = round(
+        sum(x["kg_co2e"] for x in selected), 3
+    )
+    return {
+        "period": period,
+        "activities": selected,
+        "total_kg_co2e": total,
+        "count": len(selected)
+    }
+
+def suggest_reductions(
+    tool_context: ToolContext
+) -> dict:
+    """Calculate alternative travel savings from logged trips."""
+    records = tool_context.state.get("activities", [])
+    tips = []
+    for item in records:
+        details = item["details"].lower().split()
+        if (item["category"] == "travel"
+                and len(details) >= 2):
+            try:
+                mode = details[0]
+                km = float(details[1])
+                if mode in TRAVEL and mode != "bus":
+                    saving = max(
+                        0, (TRAVEL[mode] - TRAVEL["bus"]) * km
+                    )
+                    if saving > 0:
+                        tips.append({
+                            "tip": f"Use bus instead of {mode}",
+                            "estimated_saving_kg_co2e":
+                                round(saving, 3)
+                        })
+            except ValueError:
+                pass
+    return {"suggestions": tips}
+
+root_agent = Agent(
+    name="carbon_coach",
+    model="gemini-2.5-flash",
+    description="Carbon footprint tracking assistant",
+    instruction="""
+You are Carbon Coach, an environmental AI assistant.
+
+Rules:
+1. Understand activities in conversational language.
+2. Always call calculation tools for numerical emissions.
+3. Never invent emission factors or numerical savings.
+4. After calculation, log the activity exactly once.
+5. For travel logs, store details as 'mode km',
+   for example 'car 12'.
+6. Call get_summary for daily or weekly totals.
+7. Call suggest_reductions for personalized travel tips.
+8. Clearly identify illustrative emission assumptions.
+9. Ask for electricity in kWh if only AC hours are given.
+10. Support English, Telugu and Hindi conversation.
+11. If a tool returns an error, ask for valid input.
+12. Never log an activity if its calculation failed.
+""",
+    tools=[
+        calculate_travel_emissions,
+        calculate_electricity_emissions,
+        calculate_food_emissions,
+        log_activity,
+        get_summary,
+        suggest_reductions
+    ]
+)
